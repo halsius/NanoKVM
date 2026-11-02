@@ -1,9 +1,9 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react';
-import { Button, Divider, Input, Modal, Select } from 'antd';
+import { Button, Divider, Input, Modal, Progress, Select, Tooltip } from 'antd';
 import type { InputRef } from 'antd';
 import clsx from 'clsx';
 import { useSetAtom } from 'jotai';
-import { ClipboardIcon, ClipboardPasteIcon } from 'lucide-react';
+import { ClipboardIcon, ClipboardPasteIcon, FileUpIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { paste } from '@/api/hid';
@@ -11,7 +11,69 @@ import { keyboardLockAtom } from '@/jotai/keyboard.ts';
 
 type InputStatus = '' | 'error';
 
-export const Paste = () => {
+type SendProgress = {
+  sent: number;
+  total: number;
+};
+
+// Characters typed as a dead-key sequence (two keystrokes) on the Swedish layout
+const SWEDISH_SEQUENCE_CHARS = new Set(['`', '´', '^', '~', '¨', 'é', 'É']);
+const SWEDISH_EXTRA_CHARS = 'åäöÅÄÖéÉ´¨§½¤€£µ';
+
+// The server types one keystroke per 30ms and rejects requests above 25s of
+// typing, so each chunk stays well below that budget.
+const STROKE_DELAY_MS = 30;
+const MAX_STROKES_PER_CHUNK = 600;
+
+const MAX_FILE_SIZE = 256 * 1024;
+
+function strokeCost(ch: string, langue: string): number {
+  return langue === 'se' && SWEDISH_SEQUENCE_CHARS.has(ch) ? 2 : 1;
+}
+
+function countStrokes(text: string, langue: string): number {
+  let strokes = 0;
+  for (const ch of text) {
+    strokes += strokeCost(ch, langue);
+  }
+  return strokes;
+}
+
+function chunkText(text: string, langue: string): string[] {
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let strokes = 0;
+
+  for (const ch of text) {
+    const cost = strokeCost(ch, langue);
+    if (strokes + cost > MAX_STROKES_PER_CHUNK && current.length > 0) {
+      chunks.push(current.join(''));
+      current = [];
+      strokes = 0;
+    }
+    current.push(ch);
+    strokes += cost;
+  }
+  if (current.length > 0) {
+    chunks.push(current.join(''));
+  }
+  return chunks;
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.ceil(ms / 1000);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${seconds % 60}s`;
+}
+
+type PasteProps = {
+  variant?: 'menu' | 'toolbar';
+};
+
+export const Paste = ({ variant = 'menu' }: PasteProps) => {
   const { t } = useTranslation();
   const setKeyboardLock = useSetAtom(keyboardLockAtom);
 
@@ -19,18 +81,22 @@ export const Paste = () => {
   const [inputValue, setInputValue] = useState('');
   const [isClipboardSupported, setIsClipboardSupported] = useState(false);
   const [isReadingClipboard, setIsReadingClipboard] = useState(false);
-  const [langue, setLangue] = useState('en');
+  const [langue, setLangue] = useState('se');
   const [status, setStatus] = useState<InputStatus>('');
   const [errMsg, setErrMsg] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [progress, setProgress] = useState<SendProgress | null>(null);
 
   const inputRef = useRef<InputRef>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cancelRef = useRef(false);
 
   const languages = [
     { value: 'en', label: t('keyboard.dropdownEnglish') },
     { value: 'de', label: t('keyboard.dropdownGerman') },
     { value: 'fr', label: t('keyboard.dropdownFrench') },
-    { value: 'ru', label: t('keyboard.dropdownRussian') }
+    { value: 'ru', label: t('keyboard.dropdownRussian') },
+    { value: 'se', label: t('keyboard.dropdownSwedish') }
   ];
 
   useEffect(() => {
@@ -41,6 +107,11 @@ export const Paste = () => {
     const value = e.target.value;
     setStatus(isValidForLanguage(value, langue) ? '' : 'error');
     setInputValue(value);
+  }
+
+  function onLangueChange(value: string) {
+    setLangue(value);
+    setStatus(isValidForLanguage(inputValue, value) ? '' : 'error');
   }
 
   async function readFromClipboard() {
@@ -61,6 +132,27 @@ export const Paste = () => {
       setErrMsg(t('keyboard.clipboardReadError'));
     } finally {
       setIsReadingClipboard(false);
+    }
+  }
+
+  async function onFileSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (file.size > MAX_FILE_SIZE) {
+      setErrMsg(t('keyboard.fileTooLarge'));
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const normalized = text.replace(/\r\n?/g, '\n');
+      setStatus(isValidForLanguage(normalized, langue) ? '' : 'error');
+      setInputValue(normalized);
+      setErrMsg('');
+    } catch {
+      setErrMsg(t('keyboard.fileReadError'));
     }
   }
 
@@ -129,27 +221,48 @@ export const Paste = () => {
       .join('');
   }
 
-  function submit() {
+  async function submit() {
     if (isLoading || !inputValue) return;
     setIsLoading(true);
+    setErrMsg('');
+    cancelRef.current = false;
 
-    const textToSend = langue === 'ru' ? translateRuToEnWithPunctuation(inputValue) : inputValue;
+    const normalized = inputValue.replace(/\r\n?/g, '\n');
+    const textToSend = langue === 'ru' ? translateRuToEnWithPunctuation(normalized) : normalized;
+    const chunks = chunkText(textToSend, langue);
+    setProgress({ sent: 0, total: chunks.length });
 
-    paste(textToSend, langue)
-      .then((rsp) => {
-        if (rsp.code !== 0) {
-          setErrMsg(rsp.msg);
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        if (cancelRef.current) {
+          // keep the untyped remainder so the user can resume
+          setInputValue(chunks.slice(i).join(''));
           return;
         }
 
-        setInputValue('');
-        setStatus('');
-        setErrMsg('');
-        setIsModalOpen(false);
-      })
-      .finally(() => {
-        setIsLoading(false);
-      });
+        const rsp = await paste(chunks[i], langue);
+        if (rsp.code !== 0) {
+          setErrMsg(rsp.msg);
+          setInputValue(chunks.slice(i).join(''));
+          return;
+        }
+        setProgress({ sent: i + 1, total: chunks.length });
+      }
+
+      setInputValue('');
+      setStatus('');
+      setErrMsg('');
+      setIsModalOpen(false);
+    } catch {
+      setErrMsg(t('keyboard.pasteFailed'));
+    } finally {
+      setIsLoading(false);
+      setProgress(null);
+    }
+  }
+
+  function cancelSend() {
+    cancelRef.current = true;
   }
 
   function afterOpenChange(open: boolean) {
@@ -163,6 +276,7 @@ export const Paste = () => {
   function isValidForLanguage(value: string, selectedLangue: string) {
     const isRussian = selectedLangue === 'ru';
     const isFrench = selectedLangue === 'fr';
+    const isSwedish = selectedLangue === 'se';
 
     for (const ch of value) {
       const code = ch.codePointAt(0) ?? 0;
@@ -189,6 +303,11 @@ export const Paste = () => {
         if (code <= 0x7f) continue;
         if (code >= 0x00a0 && code <= 0x017e) continue;
         return false;
+      } else if (isSwedish) {
+        // For Swedish, allow ASCII plus the characters on the Swedish layout
+        if (code <= 0x7f) continue;
+        if (SWEDISH_EXTRA_CHARS.includes(ch)) continue;
+        return false;
       } else {
         // For English/German, only allow ASCII
         if (code <= 0x7f) continue;
@@ -198,17 +317,31 @@ export const Paste = () => {
     return true;
   }
 
+  const totalStrokes = countStrokes(inputValue, langue);
+  const estimatedMs = totalStrokes * STROKE_DELAY_MS;
+
   return (
     <>
-      <div
-        className={clsx(
-          'flex cursor-pointer select-none items-center space-x-2 rounded py-1 pl-2 pr-5 hover:bg-neutral-700/70'
-        )}
-        onClick={() => setIsModalOpen(true)}
-      >
-        <ClipboardIcon size={18} />
-        <span>{t('keyboard.paste')}</span>
-      </div>
+      {variant === 'toolbar' ? (
+        <Tooltip title={t('keyboard.paste')} placement="bottom" mouseEnterDelay={0.6}>
+          <div
+            className="flex h-[30px] w-[30px] cursor-pointer items-center justify-center rounded text-neutral-300 hover:bg-neutral-700/80 hover:text-white"
+            onClick={() => setIsModalOpen(true)}
+          >
+            <ClipboardIcon size={18} />
+          </div>
+        </Tooltip>
+      ) : (
+        <div
+          className={clsx(
+            'flex cursor-pointer select-none items-center space-x-2 rounded py-1 pl-2 pr-5 hover:bg-neutral-700/70'
+          )}
+          onClick={() => setIsModalOpen(true)}
+        >
+          <ClipboardIcon size={18} />
+          <span>{t('keyboard.paste')}</span>
+        </div>
+      )}
 
       <Modal
         open={isModalOpen}
@@ -236,6 +369,7 @@ export const Paste = () => {
               variant="filled"
               icon={<ClipboardPasteIcon size={16} />}
               loading={isReadingClipboard}
+              disabled={isLoading}
               onClick={readFromClipboard}
               className="flex items-center"
             >
@@ -243,10 +377,23 @@ export const Paste = () => {
             </Button>
           )}
 
+          <Button
+            color="default"
+            variant="filled"
+            icon={<FileUpIcon size={16} />}
+            disabled={isLoading}
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center"
+          >
+            {t('keyboard.loadFile')}
+          </Button>
+          <input ref={fileInputRef} type="file" className="hidden" onChange={onFileSelected} />
+
           <Select
             value={langue}
             variant="filled"
-            onChange={(value) => setLangue(value)}
+            disabled={isLoading}
+            onChange={onLangueChange}
             options={languages}
           ></Select>
         </div>
@@ -256,14 +403,33 @@ export const Paste = () => {
           value={inputValue}
           status={status}
           showCount
-          maxLength={1024}
+          disabled={isLoading}
           autoSize={{ minRows: 6, maxRows: 12 }}
           placeholder={t('keyboard.placeholder')}
           onFocus={() => setErrMsg('')}
           onChange={onChange}
         />
 
+        {totalStrokes > MAX_STROKES_PER_CHUNK && !isLoading && (
+          <div className="pt-1 text-sm text-neutral-500">
+            {t('keyboard.estimatedTime')}: ~{formatDuration(estimatedMs)}
+          </div>
+        )}
+
         {errMsg && <div className="pt-1 text-sm text-red-500">{errMsg}</div>}
+
+        {progress && progress.total > 1 && (
+          <div className="flex items-center space-x-3 pt-2">
+            <Progress
+              className="flex-1"
+              percent={Math.round((progress.sent / progress.total) * 100)}
+              status="active"
+            />
+            <Button size="small" onClick={cancelSend}>
+              {t('keyboard.cancel')}
+            </Button>
+          </div>
+        )}
 
         <div className="flex justify-center py-5">
           <Button

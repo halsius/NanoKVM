@@ -156,6 +156,13 @@ const se = {
       dropdownGerman: 'Tyska',
       dropdownFrench: 'Franska',
       dropdownRussian: 'ryska',
+      dropdownSwedish: 'Svenska',
+      loadFile: 'Läs in fil',
+      fileTooLarge: 'Filen är för stor (max 256 KB)',
+      fileReadError: 'Det gick inte att läsa filen',
+      pasteFailed: 'Inklistringen misslyckades',
+      estimatedTime: 'Beräknad skrivtid',
+      cancel: 'Avbryt',
       shortcut: {
         title: 'Genvägar',
         custom: 'Anpassad',

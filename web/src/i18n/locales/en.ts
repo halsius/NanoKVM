@@ -158,6 +158,13 @@ const en = {
       dropdownGerman: 'German',
       dropdownFrench: 'French',
       dropdownRussian: 'Russian',
+      dropdownSwedish: 'Swedish',
+      loadFile: 'Load file',
+      fileTooLarge: 'File is too large (max 256 KB)',
+      fileReadError: 'Failed to read file',
+      pasteFailed: 'Paste failed',
+      estimatedTime: 'Estimated typing time',
+      cancel: 'Cancel',
       shortcut: {
         title: 'Shortcuts',
         custom: 'Custom',

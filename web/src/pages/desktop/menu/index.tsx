@@ -17,6 +17,7 @@ import { useMenuVisibility } from '@/hooks/useMenuVisibility.ts';
 import { KeyboardLedStatus } from '../keyboard-led-status';
 import { Fullscreen } from './fullscreen';
 import { Keyboard } from './keyboard';
+import { Paste } from './keyboard/paste.tsx';
 import { Mouse } from './mouse';
 import { Collapse, Expand } from './operations';
 import { Picoclaw } from './picoclaw';
@@ -120,6 +121,7 @@ export const Menu = () => {
 
             <Screen />
             {canControl && <Keyboard />}
+            {canControl && <Paste variant="toolbar" />}
             <Mouse />
             <Divider type="vertical" />
 

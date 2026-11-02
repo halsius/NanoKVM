@@ -166,8 +166,90 @@ func LangueSwitch(base map[rune]Char, lang string) map[rune]Char {
 		m['@'] = Char{0x40, 39}     // AltGr+0
 		m['\u20AC'] = Char{0x40, 8} // € AltGr+E
 
+	case "se":
+		// Swedish (ISO) QWERTY layout. Letters stay in US positions;
+		// å ä ö live on the US [ ' ; keys.
+		m['å'] = Char{0, 47}
+		m['Å'] = Char{2, 47}
+		m['ä'] = Char{0, 52}
+		m['Ä'] = Char{2, 52}
+		m['ö'] = Char{0, 51}
+		m['Ö'] = Char{2, 51}
+
+		// Shifted number row: 1! 2" 3# 4¤ 5% 6& 7/ 8( 9) 0=
+		m['"'] = Char{2, 31} // Shift + 2
+		m['¤'] = Char{2, 33} // Shift + 4
+		m['&'] = Char{2, 35} // Shift + 6
+		m['/'] = Char{2, 36} // Shift + 7
+		m['('] = Char{2, 37} // Shift + 8
+		m[')'] = Char{2, 38} // Shift + 9
+		m['='] = Char{2, 39} // Shift + 0
+
+		// AltGr number row
+		m['@'] = Char{0x40, 31} // AltGr + 2
+		m['£'] = Char{0x40, 32} // AltGr + 3
+		m['$'] = Char{0x40, 33} // AltGr + 4
+		m['€'] = Char{0x40, 8}  // AltGr + E
+		m['{'] = Char{0x40, 36} // AltGr + 7
+		m['['] = Char{0x40, 37} // AltGr + 8
+		m[']'] = Char{0x40, 38} // AltGr + 9
+		m['}'] = Char{0x40, 39} // AltGr + 0
+
+		// Key right of 0 (US hyphen position)
+		m['+'] = Char{0, 45}
+		m['?'] = Char{2, 45}     // Shift + +
+		m['\\'] = Char{0x40, 45} // AltGr + +
+
+		// Key left of 1 (US backtick position)
+		m['§'] = Char{0, 53}
+		m['½'] = Char{2, 53} // Shift + §
+
+		// Key right of ä (US backslash position)
+		m['\''] = Char{0, 49}
+		m['*'] = Char{2, 49} // Shift + '
+
+		// Bottom row
+		m[';'] = Char{2, 54} // Shift + ,
+		m[':'] = Char{2, 55} // Shift + .
+		m['-'] = Char{0, 56}
+		m['_'] = Char{2, 56} // Shift + -
+
+		// ISO key next to left Shift
+		m['<'] = Char{0, 100}
+		m['>'] = Char{2, 100}    // Shift + <
+		m['|'] = Char{0x40, 100} // AltGr + <
+
+		m['µ'] = Char{0x40, 16} // AltGr + M
+
+		// ` ^ ~ are dead keys on the Swedish layout and need a two-stroke
+		// sequence (see langueSequences); drop the US single-stroke entries
+		// so they don't type the wrong glyph.
+		delete(m, '`')
+		delete(m, '^')
+		delete(m, '~')
+
 	}
 	return m
+}
+
+// langueSequences returns the characters that need more than one keystroke on
+// the given layout, e.g. dead keys that only commit after a following space.
+func langueSequences(lang string) map[rune][]Char {
+	switch lang {
+	case "se":
+		space := Char{0, 44}
+		return map[rune][]Char{
+			'´': {{0, 46}, space},    // dead acute + space
+			'`': {{2, 46}, space},    // dead grave + space
+			'¨': {{0, 48}, space},    // dead diaeresis + space
+			'^': {{2, 48}, space},    // dead circumflex + space
+			'~': {{0x40, 48}, space}, // dead tilde + space
+			'é': {{0, 46}, {0, 8}},   // dead acute + e
+			'É': {{0, 46}, {2, 8}},   // dead acute + Shift+e
+		}
+	default:
+		return nil
+	}
 }
 
 func (s *Service) Paste(c *gin.Context) {
@@ -186,13 +268,16 @@ func (s *Service) Paste(c *gin.Context) {
 	}
 
 	charMapLocal := LangueSwitch(charMap, req.Langue)
-	typeableRunes := 0
+	seqMapLocal := langueSequences(req.Langue)
+	typeableStrokes := 0
 	for _, char := range contentRunes {
-		if _, ok := charMapLocal[char]; ok {
-			typeableRunes++
+		if seq, ok := seqMapLocal[char]; ok {
+			typeableStrokes += len(seq)
+		} else if _, ok := charMapLocal[char]; ok {
+			typeableStrokes++
 		}
 	}
-	if time.Duration(typeableRunes)*defaultPasteDelay > maxPasteDuration {
+	if time.Duration(typeableStrokes)*defaultPasteDelay > maxPasteDuration {
 		rsp.ErrRsp(c, -2, "paste duration exceeds 25s")
 		return
 	}
@@ -213,25 +298,32 @@ func (s *Service) Paste(c *gin.Context) {
 		})
 	}
 
+typing:
 	for _, char := range contentRunes {
 		if err := context.Cause(c.Request.Context()); err != nil {
 			break
 		}
-		key, ok := charMapLocal[char]
+		strokes, ok := seqMapLocal[char]
 		if !ok {
-			log.Debugf("unknown key '%c' (rune: %d)", char, char)
-			continue
+			key, found := charMapLocal[char]
+			if !found {
+				log.Debugf("unknown key '%c' (rune: %d)", char, char)
+				continue
+			}
+			strokes = []Char{key}
 		}
 
-		keyDown := []byte{byte(key.Modifiers), 0x00, byte(key.Code), 0x00, 0x00, 0x00, 0x00, 0x00}
-		if err = writeKeyboardReport(keyDown); err != nil {
-			break
-		}
-		if err = writeKeyboardReport(keyUp); err != nil {
-			break
-		}
-		if err = sleepPasteContext(c.Request.Context(), defaultPasteDelay); err != nil {
-			break
+		for _, key := range strokes {
+			keyDown := []byte{byte(key.Modifiers), 0x00, byte(key.Code), 0x00, 0x00, 0x00, 0x00, 0x00}
+			if err = writeKeyboardReport(keyDown); err != nil {
+				break typing
+			}
+			if err = writeKeyboardReport(keyUp); err != nil {
+				break typing
+			}
+			if err = sleepPasteContext(c.Request.Context(), defaultPasteDelay); err != nil {
+				break typing
+			}
 		}
 	}
 	if err == nil {
